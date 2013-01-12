@@ -38,9 +38,6 @@ class WeiboSearchSpider(BaseSpider):
     self.cursor = self.db.cursor()
     self.logined = False
 
-    host = settings.get('REDIS_HOST', REDIS_HOST)
-    port = settings.get('REDIS_PORT', REDIS_PORT)
-
     log.msg('login with %s' % self.username, level=log.INFO)
     login_url = self.weibo.login(self.username, self.pwd)
     if login_url:
