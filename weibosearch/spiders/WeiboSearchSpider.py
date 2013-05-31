@@ -29,51 +29,57 @@ class WeiboSearchSpider(BaseSpider):
   name = 'weibosearch'
   allowed_domains = ['weibo.com']
   weibo = Weibo()
+  # allow save to db
+  savedb = 'True'
+  username = 'YOUR_WEIBO_ACCOUNT'
+  password = 'YOUR_WEIBO_PASSWORD'
 
-  def __init__(self, username=None):
-    BaseSpider.__init__(self)
-    self.username, self.pwd = username.split(':')
-    self.db = MySQLdb.connect(host="localhost", port=3306, user="root", passwd="pw", db="weibosearch2",
-      charset='utf8', use_unicode=True)
-    self.cursor = self.db.cursor()
+  def __init__(self, name=None, **kwargs):
+    super(WeiboSearchSpider, self).__init__(name, **kwargs)
+    if not self.savedb:
+        self.db = MySQLdb.connect(host="localhost", port=3306, user="root", passwd="pw", db="weibosearch2",
+          charset='utf8', use_unicode=True)
+        self.cursor = self.db.cursor()
     self.logined = False
 
-    log.msg('login with %s' % self.username, level=log.INFO)
-    login_url = self.weibo.login(self.username, self.pwd)
+    self.log('login with %s' % self.username)
+    login_url = self.weibo.login(self.username, self.password)
     if login_url:
-      log.msg('login successful, start crawling.', level=log.INFO)
       self.start_urls.append(login_url)
-    else:
-      log.msg('login failed', level=log.ERROR)
 
   # only parse the login page
   def parse(self, response):
     if response.body.find('feedBackUrlCallBack') != -1:
-      userinfo = json.loads(re.search(r'feedBackUrlCallBack\((.*?)\)', response.body, re.I).group(1))['userinfo']
-      log.msg('user id %s' % userinfo['userid'], level=log.INFO)
-      assert userinfo['userid'] == self.username
-      self.logined = True
+      data = json.loads(re.search(r'feedBackUrlCallBack\((.*?)\)', response.body, re.I).group(1))
+      userinfo = data.get('userinfo', '')
+      if len(userinfo):
+        log.msg('user id %s' % userinfo['userid'], level=log.INFO)
+        assert userinfo['userid'] == self.username
+        self.logined = True
 
-      bootstrap = settings.get('BOOTSTRAP')
-      log.msg('bootstrap from %s' % bootstrap, level=log.INFO)
-      # FIXME: use last scheduled time instead of today, otherwise queue filter will not work
-      today = datetime.now()
-      if bootstrap == 'file':
-        lines = tuple(codecs.open('items.txt', 'r', 'utf-8'))
-        for line in lines:
-          if line.startswith("#"):
-            continue
-          start = _epoch()
-          url = QueryFactory.create_timerange_query(urllib.quote(line.encode('utf8')), start, today)
-          request = Request(url=url, callback=self.parsel_weibo)
-          request.meta['query'] = line
-          request.meta['start'] = start.strftime("%Y-%m-%d %H:%M:%S")
-          request.meta['end'] = today.strftime("%Y-%m-%d %H:%M:%S")
-          request.meta['last_fetched'] = today.strftime("%Y-%m-%d %H:%M:%S")
-          yield request
+        bootstrap = settings.get('BOOTSTRAP')
+        log.msg('bootstrap from %s' % bootstrap, level=log.INFO)
+        # FIXME: use last scheduled time instead of today, otherwise queue filter will not work
+        today = datetime.now()
+        if bootstrap == 'file':
+          lines = tuple(codecs.open('items.txt', 'r', 'utf-8'))
+          for line in lines:
+            if line.startswith("#"):
+              continue
+            start = _epoch()
+            url = QueryFactory.create_timerange_query(urllib.quote(line.encode('utf8')), start, today)
+            request = Request(url=url, callback=self.parse_weibo, meta={
+              'query': line,
+              'start': start.strftime("%Y-%m-%d %H:%M:%S"),
+              'end': today.strftime("%Y-%m-%d %H:%M:%S"),
+              'last_fetched': today.strftime("%Y-%m-%d %H:%M:%S")})
+            yield request
+      else:
+        self.log('login failed: errno=%s, reason=%s' % (data.get('errno', ''), data.get('reason', '')))
+
       # TODO: can also bootstrap from db
 
-  def parsel_weibo(self, response):
+  def parse_weibo(self, response):
     query = response.request.meta['query']
     start = datetime.strptime(response.request.meta['start'], "%Y-%m-%d %H:%M:%S")
     end = datetime.strptime(response.request.meta['end'], "%Y-%m-%d %H:%M:%S")
@@ -84,7 +90,6 @@ class WeiboSearchSpider(BaseSpider):
     scripts = jQuery('script')
 
     text = "".join(filter(lambda x: x is not None, [x.text for x in scripts]))
-
     # check if we exceed the sina limit
     sassfilter_match = re.search(r'{(\"pid\":\"pl_common_sassfilter\".*?)}', text, re.M | re.I)
     if sassfilter_match:
@@ -97,10 +102,10 @@ class WeiboSearchSpider(BaseSpider):
       if len(html) == 0:
         raise CloseSpider('not login? %s' % html)
       totalshow = pq(html)
-      if totalshow('div.topcon_num').html() is None:
+      if totalshow('div.topcon_l').html() is None:
         log.msg('%s 0 feeds' % query, level=log.INFO)
         return
-      topcon_num = int(re.search('\s(\d+)\s', totalshow('div.topcon_num').text().replace(',', ''), re.I).group(1))
+      topcon_num = int(re.search('\s(\d+)\s', totalshow('div.topcon_l').text().replace(',', ''), re.I).group(1))
       log.msg('%s %d feeds' % (query, topcon_num), level=log.INFO)
       max_feeds = settings.getint('FEED_LIMIT', 200000)
       if topcon_num > max_feeds:
@@ -112,7 +117,7 @@ class WeiboSearchSpider(BaseSpider):
 
         # first part
         url = QueryFactory.create_timerange_query(urllib.quote(query.encode('utf8')), start, middle)
-        request = Request(url=url, callback=self.parsel_weibo)
+        request = Request(url=url, callback=self.parse_weibo)
         request.meta['query'] = query
         request.meta['start'] = start.strftime("%Y-%m-%d %H:%M:%S")
         request.meta['end'] = middle.strftime("%Y-%m-%d %H:%M:%S")
@@ -122,7 +127,7 @@ class WeiboSearchSpider(BaseSpider):
 
         # second part
         url2 = QueryFactory.create_timerange_query(urllib.quote(query.encode('utf8')), middle, end)
-        request2 = Request(url=url2, callback=self.parsel_weibo)
+        request2 = Request(url=url2, callback=self.parse_weibo)
         request2.meta['query'] = query
         request2.meta['start'] = middle.strftime("%Y-%m-%d %H:%M:%S")
         request2.meta['end'] = end.strftime("%Y-%m-%d %H:%M:%S")

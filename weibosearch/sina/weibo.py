@@ -1,5 +1,6 @@
 #coding=utf8
 # original from http://www.douban.com/note/201767245/
+# also see http://www.cnblogs.com/mouse-coder/archive/2013/03/03/2941265.html for recent change in weibo login
 # modified by tpeng <pengtaoo@gmail.com>
 # 2012/9/20
 
@@ -7,7 +8,9 @@ import urllib
 import urllib2
 import cookielib
 import base64
-import re, sys, json, hashlib
+import re, sys, json
+import binascii
+import rsa
 
 postdata = {
   'entry': 'weibo',
@@ -22,7 +25,7 @@ postdata = {
   'service': 'miniblog',
   'servertime': '',
   'nonce': '',
-  'pwencode': 'wsse',
+  'pwencode': 'rsa2',
   'sp': '',
   'encoding': 'UTF-8',
   'url': 'http://weibo.com/ajaxlogin.php?framelogin=1&callback=parent.sinaSSOController.feedBackUrlCallBack',
@@ -43,22 +46,24 @@ class Weibo():
     # 将包含了cookie、http处理器、http的handler的资源和urllib2对象板顶在一起
     urllib2.install_opener(opener)
 
-  def _get_servertime(self):
-    url = 'http://login.sina.com.cn/sso/prelogin.php?entry=weibo&callback=sinaSSOController.preloginCallBack&su=dW5kZWZpbmVk&client=ssologin.js(v1.3.18)&_=1329806375939'
+  def _get_servertime(self, username):
+    url = 'http://login.sina.com.cn/sso/prelogin.php?entry=sso&callback=sinaSSOController.preloginCallBack&su=%s&rsakt=mod&client=ssologin.js(v1.4.4)' %username
     data = urllib2.urlopen(url).read()
     p = re.compile('\((.*)\)')
     json_data = p.search(data).group(1)
     data = json.loads(json_data)
     servertime = str(data['servertime'])
     nonce = data['nonce']
-    return servertime, nonce
+    pubkey = data['pubkey']
+    rsakv = data['rsakv']
+    return servertime, nonce, pubkey, rsakv
 
-  def _get_pwd(self, pwd, servertime, nonce):
-    pwd1 = hashlib.sha1(pwd).hexdigest()
-    pwd2 = hashlib.sha1(pwd1).hexdigest()
-    pwd3_ = pwd2 + servertime + nonce
-    pwd3 = hashlib.sha1(pwd3_).hexdigest()
-    return pwd3
+  def _get_pwd(self, pwd, servertime, nonce, pubkey):
+    rsaPublickey = int(pubkey, 16)
+    key = rsa.PublicKey(rsaPublickey, 65537)
+    message = str(servertime) + '\t' + str(nonce) + '\n' + str(pwd)
+    pwd = rsa.encrypt(message, key)
+    return binascii.b2a_hex(pwd)
 
   def _get_user(self, username):
     username_ = urllib.quote(username)
@@ -66,9 +71,9 @@ class Weibo():
     return username
 
   def login(self, username, pwd):
-    url = 'http://login.sina.com.cn/sso/login.php?client=ssologin.js(v1.3.18)'
+    url = 'http://login.sina.com.cn/sso/login.php?client=ssologin.js(v1.4.4)'
     try:
-      servertime, nonce = self._get_servertime()
+      servertime, nonce, pubkey, rsakv = self._get_servertime(username)
     except:
       print >> sys.stderr, 'Get severtime error!'
       return None
@@ -76,7 +81,8 @@ class Weibo():
     postdata['servertime'] = servertime
     postdata['nonce'] = nonce
     postdata['su'] = self._get_user(username)
-    postdata['sp'] = self._get_pwd(pwd, servertime, nonce)
+    postdata['sp'] = self._get_pwd(pwd, servertime, nonce, pubkey)
+    postdata['rsakv'] = rsakv
     postdata = urllib.urlencode(postdata)
     headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux i686; rv:8.0) Gecko/20100101 Firefox/8.0'}
 
